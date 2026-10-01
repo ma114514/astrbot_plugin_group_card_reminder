@@ -1,0 +1,10 @@
+name: astrbot_plugin_group_card_reminder
+display_name: 群名片定时提醒
+desc: 在多个时间点检查群名片，按历史提醒次数衰减概率并分批 @提醒
+help: 在目标群发送 /群名片检查 可预览结果（仅 AstrBot 管理员）
+version: v0.1.0
+author: ma114514
+repo: "https://github.com/ma114514/astrbot_plugin_group_card_reminder"
+astrbot_version: ">=4.27.5,<5"
+support_platforms:
+  - aiocqhttp
