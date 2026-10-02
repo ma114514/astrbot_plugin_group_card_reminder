@@ -13,16 +13,12 @@ BATCH_SIZE = 20
 LOG_2 = math.log(2)
 
 
-def parse_group_ids(raw: list[str] | str) -> list[int]:
-    """读取逐项填写的群号，也兼容旧版逗号分隔字符串。"""
-    if isinstance(raw, str):
-        entries = re.split(r"[\s,，;；]+", raw.strip()) if raw.strip() else []
-    elif isinstance(raw, list):
-        entries = raw
-    else:
+def parse_group_ids(raw: list[str]) -> list[int]:
+    """读取逐项填写的群号。"""
+    if not isinstance(raw, list):
         raise ValueError("目标群号必须是列表")
     groups = []
-    for entry in entries:
+    for entry in raw:
         if not isinstance(entry, str):
             raise ValueError("每个目标群号都必须是文本")
         value = entry.strip()
@@ -87,16 +83,12 @@ def parse_check_time(raw: str) -> tuple[int, int]:
     return int(hour), int(minute)
 
 
-def parse_check_times(raw: list[str] | str) -> list[str]:
+def parse_check_times(raw: list[str]) -> list[str]:
     """时间逐项填写，去重后按北京时间先后排序。"""
-    if isinstance(raw, str):
-        entries = [raw] if raw.strip() else []
-    elif isinstance(raw, list):
-        entries = raw
-    else:
+    if not isinstance(raw, list):
         raise ValueError("提醒时间必须是列表")
     times = []
-    for index, entry in enumerate(entries, 1):
+    for index, entry in enumerate(raw, 1):
         if not isinstance(entry, str):
             raise ValueError(f"第 {index} 个提醒时间必须是文本")
         value = entry.strip()
@@ -163,10 +155,10 @@ def invalid_cards(
 
 
 def choose_reminder_targets(
-    invalid: list[dict], remaining: int | None, mention_counts: dict[int, int], rng=None
+    invalid: list[dict], remaining: int, mention_counts: dict[int, int], rng=None
 ) -> list[dict]:
     """超出额度时先选从未 @ 的成员，再按历史 @次数减半的权重抽取。"""
-    if remaining is None or len(invalid) <= remaining:
+    if len(invalid) <= remaining:
         return invalid[:]
     if remaining <= 0:
         return []
@@ -208,7 +200,10 @@ def reminder_messages(invalid: list[dict], reminder_text: str) -> list[list[dict
         message = [
             {
                 "type": "text",
-                "data": {"text": f"{text}\n群名片不符合要求：共 {len(invalid)} 人（第 {index}/{len(batches)} 批）\n"},
+                "data": {
+                    "text": f"{text}\n群名片不符合要求：共 {len(invalid)} 人"
+                    f"（第 {index}/{len(batches)} 批）\n"
+                },
             }
         ]
         for member in batch:

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -51,6 +50,7 @@ class PluginSettings:
     keywords: list[str]
     mode: str
     check_times: list[str]
+    single_mention_limit: int
     daily_mention_limit: int
     excluded_qq_ids: set[int]
 
@@ -66,7 +66,6 @@ class GroupCardReminder(Star):
         self._run_lock = asyncio.Lock()
 
     async def initialize(self) -> None:
-        await self._migrate_config()
         data_dir = Path(StarTools.get_data_dir(PLUGIN_NAME))
         self._state = DailyState(data_dir / "daily_state.json")
         self._task = asyncio.create_task(self._scheduler(), name=f"{PLUGIN_NAME}:daily")
@@ -80,49 +79,6 @@ class GroupCardReminder(Star):
         async with self._run_lock:
             pass
 
-    async def _migrate_config(self) -> None:
-        """迁移旧群号、时间和排除名单；正则不能转换为普通字符。"""
-        changed = False
-        groups = self.config.get("group_ids", [])
-        if isinstance(groups, str):
-            try:
-                self.config["group_ids"] = [str(group_id) for group_id in parse_group_ids(groups)]
-                changed = True
-            except ValueError as exc:
-                logger.warning(f"[{PLUGIN_NAME}] 旧版群号配置无法自动迁移：{exc}")
-        old_time = self.config.get("check_time", "")
-        if old_time:
-            current_times = self.config.get("check_times", [])
-            if not current_times or (current_times == ["09:00"] and old_time != "09:00"):
-                self.config["check_times"] = [old_time]
-            self.config["check_time"] = ""
-            changed = True
-        old_excluded = self.config.get("excluded_bot_ids", [])
-        if old_excluded:
-            if self.config.get("excluded_qq_ids", []):
-                # 新名单已填写时以新名单为准，清掉旧值以免以后重新迁移。
-                self.config["excluded_bot_ids"] = []
-                changed = True
-            else:
-                try:
-                    migrated = parse_excluded_qq_ids(old_excluded)
-                except ValueError as exc:
-                    # 保留无效旧值；_settings 会拒绝扫描，避免无声漏排。
-                    logger.warning(f"[{PLUGIN_NAME}] 旧版排除名单无法自动迁移：{exc}")
-                else:
-                    self.config["excluded_qq_ids"] = [str(qq) for qq in sorted(migrated)]
-                    self.config["excluded_bot_ids"] = []
-                    changed = True
-        if changed:
-            save = getattr(self.config, "save_config", None)
-            if callable(save):
-                try:
-                    result = save()
-                    if inspect.isawaitable(result):
-                        await result
-                except Exception as exc:
-                    logger.warning(f"[{PLUGIN_NAME}] 旧配置已在内存中迁移，但保存失败：{exc}")
-
     def _settings(self) -> PluginSettings | None:
         groups = parse_group_ids(self.config.get("group_ids", []))
         keywords = parse_keywords(self.config.get("keywords", []))
@@ -130,18 +86,25 @@ class GroupCardReminder(Star):
             return None
         mode = parse_match_mode(self.config.get("match_mode", "缺少关键词时提醒"))
         check_times = parse_check_times(self.config.get("check_times", []))
-        raw_excluded = self.config.get("excluded_qq_ids", [])
-        if not raw_excluded:
-            # 即使配置保存失败，当前运行仍沿用有效旧名单；无效旧值会报错。
-            raw_excluded = self.config.get("excluded_bot_ids", [])
-        excluded_qq_ids = parse_excluded_qq_ids(raw_excluded)
-        try:
-            limit = int(self.config.get("daily_mention_limit", 0))
-        except (TypeError, ValueError, OverflowError) as exc:
-            raise ValueError("每天 @ 人数限额必须是非负整数") from exc
-        if limit < 0:
-            raise ValueError("每天 @ 人数限额必须是非负整数")
-        return PluginSettings(groups, keywords, mode, check_times, limit, excluded_qq_ids)
+        excluded_qq_ids = parse_excluded_qq_ids(self.config.get("excluded_qq_ids", []))
+
+        def read_limit(key: str, label: str) -> int:
+            raw = self.config.get(key, 0)
+            if type(raw) is int:
+                value = raw
+            elif isinstance(raw, str) and raw.isascii() and raw.isdigit():
+                value = int(raw)
+            else:
+                raise ValueError(f"{label}必须是非负整数")
+            if value < 0:
+                raise ValueError(f"{label}必须是非负整数")
+            return value
+
+        single_limit = read_limit("single_mention_limit", "单次 @ 人数限额")
+        daily_limit = read_limit("daily_mention_limit", "每日 @ 总人数限额")
+        return PluginSettings(
+            groups, keywords, mode, check_times, single_limit, daily_limit, excluded_qq_ids
+        )
 
     async def _accounts(self) -> list[tuple[int, object]]:
         async def fetch_account(platform):
@@ -220,12 +183,17 @@ class GroupCardReminder(Star):
                         accounts,
                         settings.excluded_qq_ids,
                     )
-                    # 只有人数超额才需要历史次数；不限额是最常见配置。
-                    if remaining is None or len(invalid) <= remaining:
+                    # 两种额度同时生效，先取较小值；0 在配置中代表不限额。
+                    limits = [
+                        limit for limit in (settings.single_mention_limit, remaining) if limit
+                    ]
+                    selection_limit = min(limits) if limits else None
+                    # 只有人数超额才需要历史次数，避免每次都扫描历史状态。
+                    if selection_limit is None or len(invalid) <= selection_limit:
                         selected = invalid
                     else:
                         mention_counts = self._state.member_mention_counts(group_id)
-                        selected = choose_reminder_targets(invalid, remaining, mention_counts)
+                        selected = choose_reminder_targets(invalid, selection_limit, mention_counts)
                     messages = reminder_messages(selected, self.config.get("reminder_text", ""))
                     # 在发送前原子预留 @额度；失败或重载后不会超额或重复 @。
                     if not self._state.claim(
@@ -319,17 +287,18 @@ class GroupCardReminder(Star):
                 accounts,
                 settings.excluded_qq_ids,
             )
-            remaining = None
-            if settings.daily_mention_limit > 0:
-                day = datetime.now(BEIJING).date().isoformat()
-                remaining = self._state.remaining(
-                    int(group_id), day, settings.daily_mention_limit
-                )
+            remaining = self._state.remaining(
+                int(group_id),
+                datetime.now(BEIJING).date().isoformat(),
+                settings.daily_mention_limit,
+            )
         except (ValueError, RuntimeError) as exc:
             yield event.plain_result(f"检查失败：{exc}")
             return
         shown = invalid[:30]
         lines = [f"本群 {total} 位成员中，{len(invalid)} 位符合“{settings.mode}”条件。"]
+        if settings.single_mention_limit > 0:
+            lines.append(f"单次 @限额：{settings.single_mention_limit} 人。")
         if settings.daily_mention_limit > 0:
             lines.append(f"今日剩余 @额度：{remaining}/{settings.daily_mention_limit} 人。")
         lines.extend(

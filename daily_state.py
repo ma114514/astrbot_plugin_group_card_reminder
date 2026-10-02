@@ -26,35 +26,23 @@ class DailyState:
         self._member_counts_by_group: dict[int, dict[int, int]] = {}
 
     def claimed(self, group_id: int, day: str, check_time: str) -> bool:
-        # v1.1 只记录群号；升级当天沿用该记录，避免当日重新 @。
-        return self.days.get(str(group_id)) == day or self.days.get(
-            f"{group_id}@{check_time}"
-        ) == day
+        return self.days.get(f"{group_id}@{check_time}") == day
 
-    def mentioned_count(self, group_id: int, day: str) -> int | None:
-        """None 表示升级前已执行过，但无法得知当天已 @ 的人数。"""
+    def mentioned_count(self, group_id: int, day: str) -> int:
         key = f"{self.COUNT_PREFIX}{group_id}:{day}"
-        if key in self.days:
-            value = self.days[key]
-            if not value.isascii() or not value.isdigit():
-                raise ValueError("每日 @ 人数记录损坏")
-            return int(value)
-        if self.days.get(str(group_id)) == day or any(
-            old_key.startswith(f"{group_id}@") and old_day == day
-            for old_key, old_day in self.days.items()
-        ):
-            return None
-        return 0
+        value = self.days.get(key, "0")
+        if not value.isascii() or not value.isdigit():
+            raise ValueError("每日 @ 人数记录损坏")
+        return int(value)
 
     def remaining(self, group_id: int, day: str, limit: int) -> int | None:
-        """0 为不限额；升级前未知的已发送量按额度耗尽处理。"""
+        """限额为 0 时不限制每天的人数。"""
         if limit == 0:
             return None
-        count = self.mentioned_count(group_id, day)
-        return 0 if count is None else max(0, limit - count)
+        return max(0, limit - self.mentioned_count(group_id, day))
 
     def member_mention_counts(self, group_id: int) -> dict[int, int]:
-        """读取跨天累计次数；v1.3 没有个人记录的成员视为尚未 @。"""
+        """按群缓存跨天累计次数；没有记录的成员视为尚未 @。"""
         if group_id in self._member_counts_by_group:
             return dict(self._member_counts_by_group[group_id])
         prefix = f"{self.MEMBER_PREFIX}{group_id}:"
@@ -108,28 +96,21 @@ class DailyState:
         group_id: int,
         day: str,
         check_time: str,
-        mentions: int = 0,
         limit: int = 0,
         member_ids: list[int] | None = None,
     ) -> bool:
         key = f"{group_id}@{check_time}"
         if self.claimed(group_id, day, check_time):
             return False
-        if member_ids is not None:
-            if any(type(user_id) is not int or user_id <= 0 for user_id in member_ids):
-                raise ValueError("待 @ 成员 QQ 号无效")
-            if len(set(member_ids)) != len(member_ids):
-                raise ValueError("本次提醒包含重复成员")
-            if mentions and mentions != len(member_ids):
-                raise ValueError("本次 @人数与成员列表不符")
-            mentions = len(member_ids)
-        if mentions < 0 or limit < 0:
+        member_ids = member_ids or []
+        if any(type(user_id) is not int or user_id <= 0 for user_id in member_ids):
+            raise ValueError("待 @ 成员 QQ 号无效")
+        if len(set(member_ids)) != len(member_ids):
+            raise ValueError("本次提醒包含重复成员")
+        if limit < 0:
             raise ValueError("每日 @ 人数限额无效")
-        prior_count = self.mentioned_count(group_id, day)
-        if prior_count is None and limit > 0 and mentions > 0:
-            raise ValueError("旧版当日已发送人数未知，今天不再 @")
-        count = prior_count or 0
-        if limit > 0 and count + mentions > limit:
+        count = self.mentioned_count(group_id, day)
+        if limit > 0 and count + len(member_ids) > limit:
             raise ValueError("本次提醒超出每日 @ 人数限额")
         updated = dict(self.days)
         # 只保留今天的计数；时间点状态每项仅存最近一次执行日期。
@@ -137,7 +118,6 @@ class DailyState:
             if old_key.startswith(self.COUNT_PREFIX) and not old_key.endswith(f":{day}"):
                 del updated[old_key]
         updated[key] = day
-        if prior_count is not None:
-            updated[f"{self.COUNT_PREFIX}{group_id}:{day}"] = str(count + mentions)
+        updated[f"{self.COUNT_PREFIX}{group_id}:{day}"] = str(count + len(member_ids))
         self._save(updated)
         return True

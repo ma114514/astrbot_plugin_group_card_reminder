@@ -13,13 +13,6 @@
     "default": [],
     "hint": "每项填一个 QQ 号；只按此名单排除，不根据机器人标记或发送账号自动排除"
   },
-  "excluded_bot_ids": {
-    "description": "旧版排除名单（自动迁移）",
-    "type": "list",
-    "item_type": "string",
-    "default": [],
-    "invisible": true
-  },
   "keywords": {
     "description": "群名片检查字符列表",
     "type": "list",
@@ -41,14 +34,14 @@
     "default": ["09:00"],
     "hint": "点击“添加更多”，每项填一个 HH:MM 时间，例如 09:00、18:30；每天在各时间分别检查并提醒"
   },
-  "check_time": {
-    "description": "旧版提醒时间（自动迁移）",
-    "type": "string",
-    "default": "09:00",
-    "invisible": true
+  "single_mention_limit": {
+    "description": "每群单次检查最多 @ 人数",
+    "type": "int",
+    "default": 0,
+    "hint": "0 表示不限额；每个提醒时间点独立计算。超过单次限额时，按历史 @次数选人"
   },
   "daily_mention_limit": {
-    "description": "每群每天最多 @ 人数",
+    "description": "每群每天最多 @ 总人数",
     "type": "int",
     "default": 0,
     "hint": "0 表示不限额；多个提醒时间共用当天额度。人数超额时优先提醒从未 @过的人；重复提醒的抽取权重每次减半。失败时预留额度不退回"

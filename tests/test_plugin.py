@@ -67,7 +67,9 @@ plugin_module = load_plugin()
 
 
 class FakeClient:
-    def __init__(self, bot_id, members=None, *, query_error=False, send_error=False, fail_on_send=None):
+    def __init__(
+        self, bot_id, members=None, *, query_error=False, send_error=False, fail_on_send=None
+    ):
         self.bot_id = bot_id
         self.members = members
         self.query_error = query_error
@@ -113,13 +115,14 @@ def make_member(user_id, card):
 
 class RuleTests(unittest.TestCase):
     def test_group_keywords_and_time_config(self):
-        self.assertEqual(parse_group_ids("123, 456，123"), [123, 456])
         self.assertEqual(
             parse_group_ids(["123", "aiocqhttp:GroupMessage:456", "123", ""]),
             [123, 456],
         )
         with self.assertRaises(ValueError):
             parse_group_ids(["123", "bad"])
+        with self.assertRaises(ValueError):
+            parse_group_ids("123,456")
         self.assertEqual(parse_keywords([" 部门 ", "学生", "部门", ""]), ["部门", "学生"])
         self.assertEqual(parse_match_mode(MODE_MISSING), MODE_MISSING)
         self.assertEqual(parse_match_mode(MODE_PRESENT), MODE_PRESENT)
@@ -135,6 +138,8 @@ class RuleTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "第 2 个"):
             parse_check_times(["09:00", "25:00"])
+        with self.assertRaises(ValueError):
+            parse_check_times("09:00")
         self.assertEqual(parse_excluded_qq_ids([" 100 ", "200", "100", ""]), {100, 200})
         with self.assertRaisesRegex(ValueError, "第 2 个排除的 QQ 号"):
             parse_excluded_qq_ids(["100", "not-a-qq"])
@@ -194,12 +199,13 @@ class RuleTests(unittest.TestCase):
             self.assertEqual(schema[key]["item_type"], "string")
         self.assertEqual(schema["group_ids"]["default"], [])
         self.assertEqual(schema["excluded_qq_ids"]["default"], [])
-        self.assertTrue(schema["excluded_bot_ids"]["invisible"])
         self.assertEqual(schema["keywords"]["default"], [])
         self.assertEqual(schema["check_times"]["default"], ["09:00"])
+        self.assertEqual(schema["single_mention_limit"]["default"], 0)
         self.assertEqual(schema["daily_mention_limit"]["default"], 0)
         self.assertEqual(schema["match_mode"]["options"], [MODE_MISSING, MODE_PRESENT])
-        self.assertTrue(schema["check_time"]["invisible"])
+        self.assertNotIn("excluded_bot_ids", schema)
+        self.assertNotIn("check_time", schema)
         self.assertNotIn("card_patterns", schema)
 
     def test_45_people_become_three_real_at_messages(self):
@@ -249,7 +255,7 @@ class RuleTests(unittest.TestCase):
             self.assertEqual(state.remaining(123, "2026-09-22", 3), 0)
             self.assertEqual(DailyState(path).member_mention_counts(123), {11: 2, 12: 1})
             with self.assertRaises(ValueError):
-                state.claim(123, "2026-09-22", "20:00", mentions=1, limit=3)
+                state.claim(123, "2026-09-22", "20:00", limit=3, member_ids=[13])
             self.assertEqual(
                 json.loads(path.read_text()),
                 {
@@ -269,17 +275,6 @@ class RuleTests(unittest.TestCase):
                 with self.assertRaises(OSError):
                     state.record_sent_members(123, [11, 12])
             self.assertEqual(state.member_mention_counts(123), {11: 1})
-
-    def test_old_state_blocks_repeat_on_upgrade_day(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "daily_state.json"
-            path.write_text('{"123": "2026-09-22"}', encoding="utf-8")
-            state = DailyState(path)
-            self.assertEqual(state.remaining(123, "2026-09-22", 5), 0)
-            self.assertFalse(state.claim(123, "2026-09-22", "09:00"))
-            self.assertFalse(state.claim(123, "2026-09-22", "18:30"))
-            self.assertTrue(state.claim(123, "2026-09-23", "09:00"))
-
 
 class PluginTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -429,51 +424,6 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
-    async def test_legacy_config_is_migrated_to_lists(self):
-        first = FakeClient(100, [make_member(10, "")])
-        plugin = self.make_plugin(first)
-        class SaveableConfig(dict):
-            saves = 0
-
-            def save_config(self):
-                self.saves += 1
-
-        plugin.config = SaveableConfig({
-            "group_ids": "123,456",
-            "card_patterns": [r"部门-.+"],
-            "keywords": [],
-            "check_time": "18:30",
-            "check_times": ["09:00"],
-            "excluded_bot_ids": ["200", "100", "200"],
-            "excluded_qq_ids": [],
-        })
-        await plugin._migrate_config()
-        self.assertEqual(plugin.config["group_ids"], ["123", "456"])
-        self.assertEqual(plugin.config["check_times"], ["18:30"])
-        self.assertEqual(plugin.config["check_time"], "")
-        self.assertEqual(plugin.config["keywords"], [])
-        self.assertEqual(plugin.config["excluded_qq_ids"], ["100", "200"])
-        self.assertEqual(plugin.config["excluded_bot_ids"], [])
-        self.assertEqual(plugin.config.saves, 1)
-
-    async def test_new_exclusion_list_overrides_old_one(self):
-        plugin = self.make_plugin(FakeClient(100, [make_member(1, "")]))
-        plugin.config["excluded_bot_ids"] = ["1"]
-        plugin.config["excluded_qq_ids"] = ["2"]
-        await plugin._migrate_config()
-        self.assertEqual(plugin.config["excluded_bot_ids"], [])
-        self.assertEqual(plugin._settings().excluded_qq_ids, {2})
-
-    async def test_invalid_old_exclusion_list_prevents_scan(self):
-        first = FakeClient(100, [make_member(1, "")])
-        plugin = self.make_plugin(first)
-        plugin.config["excluded_bot_ids"] = ["invalid"]
-        plugin.config["excluded_qq_ids"] = []
-        await plugin._migrate_config()
-        await plugin._run_at("09:00", self.day)
-        self.assertEqual(first.calls, [])
-        self.assertFalse(self.path.exists())
-
     async def test_unlimited_scan_skips_history_lookup(self):
         first = FakeClient(100, [make_member(1, "")])
         plugin = self.make_plugin(first)
@@ -525,6 +475,48 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual(at_ids, ["1", "2", "3"])
         self.assertEqual(DailyState(self.path).remaining(123, "2026-09-22", 3), 0)
+
+    async def test_single_limit_applies_across_batches_and_resets_each_slot(self):
+        first = FakeClient(100, [make_member(user_id, "") for user_id in range(1, 46)])
+        plugin = self.make_plugin(first)
+        plugin.config["single_mention_limit"] = 21
+        with patch.object(plugin_module.asyncio, "sleep", new=AsyncMock()):
+            await plugin._run_at("09:00", self.day)
+            await plugin._run_at("18:30", datetime(2026, 9, 22, 18, 30, tzinfo=BEIJING))
+        self.assertEqual(len(first.sent()), 4)
+        self.assertEqual(
+            [sum(part["type"] == "at" for part in sent["message"]) for sent in first.sent()],
+            [20, 1, 20, 1],
+        )
+        self.assertEqual(DailyState(self.path).mentioned_count(123, "2026-09-22"), 42)
+
+    async def test_single_and_daily_limits_take_smaller_available_quota(self):
+        first = FakeClient(100, [make_member(user_id, "") for user_id in range(1, 6)])
+        plugin = self.make_plugin(first)
+        plugin.config["single_mention_limit"] = 2
+        plugin.config["daily_mention_limit"] = 3
+        await plugin._run_at("09:00", self.day)
+        await plugin._run_at("18:30", datetime(2026, 9, 22, 18, 30, tzinfo=BEIJING))
+        self.assertEqual(
+            [
+                part["data"]["qq"]
+                for sent in first.sent()
+                for part in sent["message"]
+                if part["type"] == "at"
+            ],
+            ["1", "2", "3"],
+        )
+        self.assertEqual(DailyState(self.path).remaining(123, "2026-09-22", 3), 0)
+
+    async def test_invalid_mention_limits_stop_scan(self):
+        first = FakeClient(100, [make_member(1, "")])
+        plugin = self.make_plugin(first)
+        for key in ("single_mention_limit", "daily_mention_limit"):
+            for value in (-1, 1.5, True, "abc"):
+                plugin.config[key] = value
+                await plugin._run_at("09:00", self.day)
+                self.assertEqual(first.calls, [])
+            plugin.config.pop(key)
 
     async def test_daily_limit_prefers_new_members_across_times(self):
         first = FakeClient(100, [make_member(1, ""), make_member(2, "")])
@@ -610,19 +602,11 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.mentioned_count(123, "2026-09-22"), 21)
         self.assertEqual(state.member_mention_counts(123), {user_id: 1 for user_id in range(1, 21)})
 
-    async def test_old_slot_state_with_unknown_mentions_uses_no_limit_today(self):
-        self.path.write_text('{"123@09:00": "2026-09-22"}', encoding="utf-8")
-        first = FakeClient(100, [make_member(10, "")])
-        plugin = self.make_plugin(first)
-        plugin.config["daily_mention_limit"] = 5
-        evening = datetime(2026, 9, 22, 18, 30, tzinfo=BEIJING)
-        await plugin._run_at("18:30", evening)
-        self.assertEqual(first.sent(), [])
-        self.assertEqual(DailyState(self.path).mentioned_count(123, "2026-09-22"), None)
-
     async def test_manual_preview_has_no_at_or_daily_claim(self):
         first = FakeClient(100, [make_member(10, "")])
         plugin = self.make_plugin(first)
+        plugin.config["single_mention_limit"] = 2
+        plugin.config["daily_mention_limit"] = 5
         event = types.SimpleNamespace(
             is_admin=lambda: True,
             get_group_id=lambda: "123",
@@ -631,6 +615,8 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         replies = [reply async for reply in plugin.check_cards(event)]
         self.assertEqual(len(replies), 1)
         self.assertIn("10：", replies[0])
+        self.assertIn("单次 @限额：2 人", replies[0])
+        self.assertIn("今日剩余 @额度：5/5 人", replies[0])
         self.assertEqual(first.sent(), [])
         self.assertFalse(self.path.exists())
 
