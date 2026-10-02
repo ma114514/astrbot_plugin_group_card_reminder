@@ -1,0 +1,28 @@
+# Python 运行和测试产生的缓存
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# 本地虚拟环境、构建产物和安装包
+.venv/
+venv/
+build/
+dist/
+*.egg-info/
+*.zip
+
+# 本地配置、日志及插件运行状态
+.env
+.env.*
+!.env.example
+*.log
+data/
+daily_state.json
+daily_state.json.*
+
+# 项目备忘不作为插件源码发布
+项目须知.md
